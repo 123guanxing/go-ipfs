@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -63,14 +64,24 @@ func (q *Queue) Dequeue() <-chan cid.Cid {
 }
 
 // Look for next Cid in the queue and return it. Skip over gaps and mangled data
-func (q *Queue) nextEntry() (datastore.Key, cid.Cid) {
+func (q *Queue) nextEntry() (datastore.Key, cid.Cid, error) {
 	for {
 		if q.head >= q.tail {
-			return datastore.Key{}, cid.Undef
+			return datastore.Key{}, cid.Undef, nil
 		}
 
 		key := q.queueKey(q.head)
-		value, err := q.ds.Get(key)
+		k := datastore.Key{}
+
+		var value []byte
+		var err error
+
+		select {
+		case <-q.ctx.Done():
+			return datastore.Key{}, cid.Undef, errors.New("context cancelled")
+		default:
+			value, err = q.ds.Get(k)
+		}
 
 		if err == datastore.ErrNotFound {
 			log.Warningf("Error missing entry in queue: %s", key)
@@ -92,7 +103,7 @@ func (q *Queue) nextEntry() (datastore.Key, cid.Cid) {
 			continue
 		}
 
-		return key, c
+		return key, c, nil
 	}
 }
 
@@ -101,10 +112,14 @@ func (q *Queue) work() {
 	go func() {
 		var k datastore.Key = datastore.Key{}
 		var c cid.Cid = cid.Undef
+		var err error
 
 		for {
 			if c == cid.Undef {
-				k, c = q.nextEntry()
+				k, c, err = q.nextEntry()
+				if err != nil {
+					return
+				}
 			}
 
 			// If c != cid.Undef set dequeue and attempt write, otherwise wait for enqueue
